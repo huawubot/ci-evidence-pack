@@ -280,9 +280,8 @@ def sign(
     # 缺证书 = 拿不到身份（3）；拿不到 tlog = 签名失去了公开可审计的落点（3）。
     data = _check_bundle_structure(bundle)
     material = data.get("verificationMaterial") or {}
-    chain = material.get("x509CertificateChain") or {}
-    certs = chain.get("certificates") or []
-    if not certs:
+    leaf_cert = _extract_bundle_certificate(material)
+    if not leaf_cert:
         raise ToolFailure("签出的 bundle 里没有 x509 证书链：Fulcio 短期证书没拿到。")
     if not material.get("tlogEntries"):
         raise ToolFailure(
@@ -290,7 +289,7 @@ def sign(
             "检查 SIGSTORE_REKOR_URL 与网络。"
         )
     result.tlog_checked = True
-    _fill_cert_window(result, certs[0])
+    _fill_cert_window(result, leaf_cert)
     return result
 
 
@@ -339,6 +338,26 @@ def _iso8601(value: str) -> str:
         )
     except ValueError:
         return value
+
+
+def _extract_bundle_certificate(material: dict) -> dict | None:
+    """从 verificationMaterial 中提取叶子证书对象。
+
+    Sigstore Bundle 规范存在多版本形态：
+    - v0.1 / v0.2: `verificationMaterial.x509CertificateChain.certificates[0]`
+    - v0.3+: `verificationMaterial.certificate`
+    """
+    if not isinstance(material, dict):
+        return None
+    cert = material.get("certificate")
+    if isinstance(cert, dict) and "rawBytes" in cert:
+        return cert
+    chain = material.get("x509CertificateChain")
+    if isinstance(chain, dict):
+        certs = chain.get("certificates") or []
+        if certs and isinstance(certs[0], dict) and "rawBytes" in certs[0]:
+            return certs[0]
+    return None
 
 
 def _check_bundle_structure(bundle: Path) -> dict:
@@ -457,9 +476,9 @@ def verify(
     # 说明这份 bundle 不是这张证书在那段时间签的 —— 证据链断裂（2）。
     _check_certificate_window(data)
     material = data.get("verificationMaterial") or {}
-    certs = ((material.get("x509CertificateChain") or {}).get("certificates")) or []
-    if certs:
-        _fill_cert_window(result, certs[0])
+    leaf_cert = _extract_bundle_certificate(material)
+    if leaf_cert:
+        _fill_cert_window(result, leaf_cert)
     return result
 
 
@@ -470,8 +489,8 @@ def _check_certificate_window(data: dict) -> None:
     两者任一取不到就不作判定（缺 openssl 是环境问题，不能因此判人篡改）。
     """
     material = data.get("verificationMaterial") or {}
-    certs = ((material.get("x509CertificateChain") or {}).get("certificates")) or []
-    if not certs:
+    leaf_cert = _extract_bundle_certificate(material)
+    if not leaf_cert:
         return
     signed_ats = [
         int(entry["integratedTime"])
@@ -481,7 +500,7 @@ def _check_certificate_window(data: dict) -> None:
     if not signed_ats:
         return
 
-    window = _cert_window(certs[0])
+    window = _cert_window(leaf_cert)
     if window is None:
         return
     not_before, not_after = window
